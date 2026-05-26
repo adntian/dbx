@@ -41,6 +41,8 @@ pub struct ConnectionConfig {
     pub ssh_expose_lan: bool,
     #[serde(default = "default_ssh_connect_timeout_secs")]
     pub ssh_connect_timeout_secs: u64,
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
     #[serde(default)]
     pub proxy_enabled: bool,
     #[serde(default)]
@@ -85,6 +87,10 @@ fn default_ssh_port() -> u16 {
 }
 
 pub fn default_ssh_connect_timeout_secs() -> u64 {
+    5
+}
+
+pub fn default_connect_timeout_secs() -> u64 {
     5
 }
 
@@ -177,6 +183,14 @@ impl ConnectionConfig {
             default_ssh_connect_timeout_secs()
         } else {
             self.ssh_connect_timeout_secs
+        }
+    }
+
+    pub fn effective_connect_timeout_secs(&self) -> u64 {
+        if self.connect_timeout_secs == 0 {
+            default_connect_timeout_secs()
+        } else {
+            self.connect_timeout_secs
         }
     }
 
@@ -703,6 +717,7 @@ mod tests {
             ssh_key_passphrase: String::new(),
             ssh_expose_lan: false,
             ssh_connect_timeout_secs: default_ssh_connect_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
             proxy_enabled: false,
             proxy_type: ProxyType::Socks5,
             proxy_host: String::new(),

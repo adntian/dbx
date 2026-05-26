@@ -143,6 +143,7 @@ mod tests {
             ssh_key_passphrase: String::new(),
             ssh_expose_lan: false,
             ssh_connect_timeout_secs: dbx_core::models::connection::default_ssh_connect_timeout_secs(),
+            connect_timeout_secs: dbx_core::models::connection::default_connect_timeout_secs(),
             proxy_enabled: false,
             proxy_type: ProxyType::Socks5,
             proxy_host: String::new(),
@@ -212,25 +213,29 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
     let probe_result = probe_connection_endpoint(&config, &host, port).await;
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
+    let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     let result = match probe_result {
         Err(e) => Err(e),
         Ok(()) => match config.db_type {
-            DatabaseType::Mysql if config.needs_bare_mysql() => match db::mysql::connect_bare(&url).await {
+            DatabaseType::Mysql if config.needs_bare_mysql() => {
+                match db::mysql::connect_bare(&url, connect_timeout).await {
+                    Ok(pool) => {
+                        let _ = pool.disconnect().await;
+                        Ok("Connection successful".to_string())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            DatabaseType::Mysql => match db::mysql::connect(&url, connect_timeout).await {
                 Ok(pool) => {
                     let _ = pool.disconnect().await;
                     Ok("Connection successful".to_string())
                 }
                 Err(e) => Err(e),
             },
-            DatabaseType::Mysql => match db::mysql::connect(&url).await {
-                Ok(pool) => {
-                    let _ = pool.disconnect().await;
-                    Ok("Connection successful".to_string())
-                }
-                Err(e) => Err(e),
-            },
-            DatabaseType::Doris | DatabaseType::StarRocks => match db::mysql::connect_bare(&url).await {
+            DatabaseType::Doris | DatabaseType::StarRocks => match db::mysql::connect_bare(&url, connect_timeout).await
+            {
                 Ok(pool) => {
                     let _ = pool.disconnect().await;
                     Ok("Connection successful".to_string())
@@ -238,7 +243,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 Err(e) => Err(e),
             },
             DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
-                match db::postgres::connect(&url).await {
+                match db::postgres::connect(&url, connect_timeout).await {
                     Ok(pool) => {
                         pool.close();
                         Ok("Connection successful".to_string())
@@ -250,7 +255,9 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 Ok(_) => Ok("Connection successful".to_string()),
                 Err(e) => Err(e),
             },
-            DatabaseType::Redis => db::redis_driver::connect(&url).await.map(|_| "Connection successful".to_string()),
+            DatabaseType::Redis => {
+                db::redis_driver::connect(&url, connect_timeout).await.map(|_| "Connection successful".to_string())
+            }
             DatabaseType::DuckDb => {
                 if state.duckdb_existing_pool_is_usable_for_config(&config).await? {
                     Ok("Connection successful".to_string())
@@ -260,8 +267,8 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 }
             }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url).await {
-                    Ok(client) => match db::mongo_driver::test_connection(&client).await {
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                    Ok(client) => match db::mongo_driver::test_connection(&client, connect_timeout).await {
                         Ok(()) => return Ok("Connection successful".to_string()),
                         Err(e) => e,
                     },
@@ -288,22 +295,33 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     username,
                     password,
                     Some(&config.ca_cert_path),
+                    connect_timeout,
                 )?;
-                db::clickhouse_driver::test_connection(&client).await.map(|_| "Connection successful".to_string())
-            }
-            DatabaseType::SqlServer => {
-                db::sqlserver::connect(&host, port, &config.username, &config.password, config.database.as_deref())
+                db::clickhouse_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::SqlServer => db::sqlserver::connect(
+                &host,
+                port,
+                &config.username,
+                &config.password,
+                config.database.as_deref(),
+                connect_timeout,
+            )
+            .await
+            .map(|_| "Connection successful".to_string()),
             DatabaseType::Elasticsearch => {
                 let client = db::elasticsearch_driver::EsClient::new(
                     &url,
                     Some(&config.username),
                     Some(&config.password),
                     config.ssl,
+                    connect_timeout,
                 );
-                db::elasticsearch_driver::test_connection(&client).await.map(|_| "Connection successful".to_string())
+                db::elasticsearch_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
                 test_agent_connection(state.inner(), &config, &host, port).await
@@ -343,21 +361,22 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
     let (host, port) = state.connection_host_port(&id, &db_config).await?;
     probe_connection_endpoint(&db_config, &host, port).await?;
     let url = connection_url_for_endpoint(&db_config, &host, port);
+    let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
 
     let pool = match db_config.db_type {
         DatabaseType::Mysql if db_config.needs_bare_mysql() => {
-            PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
+            PoolKind::Mysql(db::mysql::connect_bare(&url, connect_timeout).await?, MysqlMode::Bare)
         }
-        DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url).await?, MysqlMode::Normal),
+        DatabaseType::Mysql => PoolKind::Mysql(db::mysql::connect(&url, connect_timeout).await?, MysqlMode::Normal),
         DatabaseType::Doris | DatabaseType::StarRocks => {
-            PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
+            PoolKind::Mysql(db::mysql::connect_bare(&url, connect_timeout).await?, MysqlMode::Bare)
         }
         DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
-            PoolKind::Postgres(db::postgres::connect(&url).await?)
+            PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?)
         }
         DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&expand_tilde(&db_config.host)).await?),
         DatabaseType::Redis => {
-            let con = db::redis_driver::connect(&url).await?;
+            let con = db::redis_driver::connect(&url, connect_timeout).await?;
             PoolKind::Redis(tokio::sync::Mutex::new(con))
         }
         DatabaseType::DuckDb => {
@@ -371,8 +390,8 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
             PoolKind::DuckDb(con)
         }
         DatabaseType::MongoDb => {
-            let native_err = match db::mongo_driver::connect(&url).await {
-                Ok(client) => match db::mongo_driver::test_connection(&client).await {
+            let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                Ok(client) => match db::mongo_driver::test_connection(&client, connect_timeout).await {
                     Ok(()) => {
                         state.configs.write().await.insert(id.clone(), config);
                         state.connections.write().await.insert(id.clone(), PoolKind::MongoDb(client));
@@ -401,8 +420,9 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 username,
                 password,
                 Some(&db_config.ca_cert_path),
+                connect_timeout,
             )?;
-            db::clickhouse_driver::test_connection(&client).await?;
+            db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::ClickHouse(client)
         }
         DatabaseType::SqlServer => {
@@ -412,6 +432,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 &db_config.username,
                 &db_config.password,
                 db_config.database.as_deref(),
+                connect_timeout,
             )
             .await?;
             PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
@@ -422,8 +443,9 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 Some(&db_config.username),
                 Some(&db_config.password),
                 db_config.ssl,
+                connect_timeout,
             );
-            db::elasticsearch_driver::test_connection(&client).await?;
+            db::elasticsearch_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::Elasticsearch(client)
         }
         db_type if database_capabilities::is_agent_type(&db_type) => {

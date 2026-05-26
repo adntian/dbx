@@ -1,6 +1,7 @@
 use base64::Engine;
 use redis::{FromRedisValue, Value as RedisRawValue};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const STREAM_ENTRY_LIMIT: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
@@ -56,16 +57,16 @@ pub struct RedisCommandResult {
     pub value: serde_json::Value,
 }
 
-pub async fn connect(url: &str) -> Result<redis::aio::MultiplexedConnection, String> {
+pub async fn connect(url: &str, timeout: Duration) -> Result<redis::aio::MultiplexedConnection, String> {
     let client = redis::Client::open(url).map_err(|e| format!("Redis connection failed: {e}"))?;
-    let mut con = tokio::time::timeout(super::connection_timeout(), client.get_multiplexed_async_connection())
+    let mut con = tokio::time::timeout(timeout, client.get_multiplexed_async_connection())
         .await
-        .map_err(|_| format!("Redis connection timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
+        .map_err(|_| format!("Redis connection timed out ({}s)", timeout.as_secs()))?
         .map_err(|e| format!("Redis connection failed: {e}"))?;
 
-    tokio::time::timeout(super::connection_timeout(), redis::cmd("PING").query_async::<String>(&mut con))
+    tokio::time::timeout(timeout, redis::cmd("PING").query_async::<String>(&mut con))
         .await
-        .map_err(|_| format!("Redis ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
+        .map_err(|_| format!("Redis ping timed out ({}s)", timeout.as_secs()))?
         .map_err(|e| format!("Redis authentication failed or command rejected: {e}"))?;
 
     Ok(con)

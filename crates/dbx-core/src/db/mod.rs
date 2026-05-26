@@ -50,8 +50,12 @@ pub fn tcp_probe_timeout() -> Duration {
 }
 
 pub fn parse_connect_timeout(url: &str) -> Duration {
+    parse_connect_timeout_with_fallback(url, connection_timeout())
+}
+
+pub fn parse_connect_timeout_with_fallback(url: &str, fallback: Duration) -> Duration {
     let Some(query) = url.split('?').nth(1) else {
-        return connection_timeout();
+        return fallback;
     };
     for param in query.split('&') {
         let trimmed = param.trim();
@@ -62,7 +66,11 @@ pub fn parse_connect_timeout(url: &str) -> Duration {
             Some(pair) => pair,
             None => continue,
         };
-        if key.eq_ignore_ascii_case("connect_timeout") || key.eq_ignore_ascii_case("connectTimeout") {
+        if key.eq_ignore_ascii_case("connect_timeout")
+            || key.eq_ignore_ascii_case("connectTimeout")
+            || key.eq_ignore_ascii_case("connection_timeout")
+            || key.eq_ignore_ascii_case("connectionTimeout")
+        {
             if let Ok(v) = value.parse::<u64>() {
                 if v >= 1 && v <= 300 {
                     return Duration::from_secs(v);
@@ -70,7 +78,7 @@ pub fn parse_connect_timeout(url: &str) -> Duration {
             }
         }
     }
-    connection_timeout()
+    fallback
 }
 
 pub async fn with_connection_timeout<T, F>(label: &str, timeout: Duration, future: F) -> Result<T, String>

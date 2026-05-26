@@ -163,8 +163,8 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         .unwrap_or(serde_json::Value::Null)
 }
 
-pub async fn connect(url: &str) -> Result<MySqlPool, String> {
-    let timeout = super::parse_connect_timeout(url);
+pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
+    let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
     let pool = create_pool(url)?;
     let result = verify_pool_connection(&pool, timeout).await;
 
@@ -245,6 +245,8 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
                 && !segment.starts_with("time-zone=")
                 && !segment.to_ascii_lowercase().starts_with("connect_timeout=")
                 && !segment.to_ascii_lowercase().starts_with("connecttimeout=")
+                && !segment.to_ascii_lowercase().starts_with("connection_timeout=")
+                && !segment.to_ascii_lowercase().starts_with("connectiontimeout=")
         })
         .collect();
 
@@ -257,8 +259,8 @@ fn mysql_async_url(url: &str) -> Cow<'_, str> {
     }
 }
 
-pub async fn connect_bare(url: &str) -> Result<MySqlPool, String> {
-    let timeout = super::parse_connect_timeout(url);
+pub async fn connect_bare(url: &str, fallback_timeout: Duration) -> Result<MySqlPool, String> {
+    let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
     let pool = create_pool(url)?;
     verify_pool_connection(&pool, timeout).await.map(|_| pool)
 }

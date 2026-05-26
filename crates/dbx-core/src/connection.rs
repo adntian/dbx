@@ -178,24 +178,25 @@ impl AppState {
         let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
         probe_connection_endpoint(&db_config, &host, port).await?;
         let url = connection_url_for_endpoint(&db_config, &host, port);
+        let connect_timeout = std::time::Duration::from_secs(db_config.effective_connect_timeout_secs());
         let pool = match db_config.db_type {
             DatabaseType::Mysql if db_config.needs_bare_mysql() => {
-                PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
+                PoolKind::Mysql(db::mysql::connect_bare(&url, connect_timeout).await?, MysqlMode::Bare)
             }
             DatabaseType::Mysql => {
-                let pool = db::mysql::connect(&url).await?;
+                let pool = db::mysql::connect(&url, connect_timeout).await?;
                 let mode = detect_ob_oracle_mode(&db_config, &pool).await;
                 PoolKind::Mysql(pool, mode)
             }
             DatabaseType::Doris | DatabaseType::StarRocks => {
-                PoolKind::Mysql(db::mysql::connect_bare(&url).await?, MysqlMode::Bare)
+                PoolKind::Mysql(db::mysql::connect_bare(&url, connect_timeout).await?, MysqlMode::Bare)
             }
             DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
-                PoolKind::Postgres(db::postgres::connect(&url).await?)
+                PoolKind::Postgres(db::postgres::connect(&url, connect_timeout).await?)
             }
             DatabaseType::Sqlite => PoolKind::Sqlite(db::sqlite::connect_path(&expand_tilde(&db_config.host)).await?),
             DatabaseType::Redis => {
-                let con = db::redis_driver::connect(&url).await?;
+                let con = db::redis_driver::connect(&url, connect_timeout).await?;
                 PoolKind::Redis(tokio::sync::Mutex::new(con))
             }
             DatabaseType::DuckDb => {
@@ -209,8 +210,8 @@ impl AppState {
                 PoolKind::DuckDb(con)
             }
             DatabaseType::MongoDb => {
-                let native_err = match db::mongo_driver::connect(&url).await {
-                    Ok(client) => match db::mongo_driver::test_connection(&client).await {
+                let native_err = match db::mongo_driver::connect(&url, connect_timeout).await {
+                    Ok(client) => match db::mongo_driver::test_connection(&client, connect_timeout).await {
                         Ok(()) => {
                             self.connections.write().await.insert(pool_key.clone(), PoolKind::MongoDb(client));
                             return Ok(pool_key);
@@ -237,8 +238,9 @@ impl AppState {
                     username,
                     password,
                     Some(&db_config.ca_cert_path),
+                    connect_timeout,
                 )?;
-                db::clickhouse_driver::test_connection(&client).await?;
+                db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::ClickHouse(client)
             }
             DatabaseType::SqlServer => {
@@ -248,6 +250,7 @@ impl AppState {
                     &db_config.username,
                     &db_config.password,
                     db_config.database.as_deref(),
+                    connect_timeout,
                 )
                 .await?;
                 PoolKind::SqlServer(Arc::new(tokio::sync::Mutex::new(client)))
@@ -259,8 +262,9 @@ impl AppState {
                     Some(&db_config.username),
                     Some(&db_config.password),
                     accept_invalid_certs,
+                    connect_timeout,
                 );
-                db::elasticsearch_driver::test_connection(&client).await?;
+                db::elasticsearch_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
             }
             DatabaseType::Dameng
@@ -655,6 +659,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "password": config.password,
         "url_params": config.url_params.as_deref().unwrap_or(""),
         "connection_string": connection_string,
+        "connect_timeout_secs": config.effective_connect_timeout_secs(),
     })
 }
 
@@ -871,6 +876,7 @@ mod tests {
             ssh_key_passphrase: String::new(),
             ssh_expose_lan: false,
             ssh_connect_timeout_secs: crate::models::connection::default_ssh_connect_timeout_secs(),
+            connect_timeout_secs: crate::models::connection::default_connect_timeout_secs(),
             proxy_enabled: false,
             proxy_type: ProxyType::Socks5,
             proxy_host: String::new(),
@@ -1081,7 +1087,7 @@ mod tests {
 
     async fn assert_live_postgres_like_query(config: ConnectionConfig) {
         let url = connection_url_for_endpoint(&config, &config.host, config.port);
-        let pool = db::postgres::connect(&url).await.unwrap_or_else(|err| {
+        let pool = db::postgres::connect(&url, std::time::Duration::from_secs(5)).await.unwrap_or_else(|err| {
             panic!("failed to connect to {:?} at {}:{}: {}", config.db_type, config.host, config.port, err)
         });
         let result =
